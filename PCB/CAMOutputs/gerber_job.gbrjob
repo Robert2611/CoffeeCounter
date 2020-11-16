@@ -1,0 +1,24 @@
+{
+    "Header": {
+        "Comment": "All values are metric (mm)",
+        "CreationDate": "2020-11-14T10:19:51Z",
+        "GenerationSoftware": {
+            "Application": "EAGLE",
+            "Vendor": "Autodesk",
+            "Version": "9.6.0"
+        },
+        "Part": "Single"
+    },
+    "Overall": {
+        "BoardThickness": 1.57,
+        "LayerNumber": 2,
+        "Name": {
+            "ProjectId": "CoffeeCounter"
+        },
+        "Owner": "Robert Niemoeller <robertniemoeller@gmail.com>",
+        "Size": {
+            "X": 54.61,
+            "Y": 55.88
+        }
+    }
+}
