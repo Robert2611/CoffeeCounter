@@ -6,16 +6,20 @@
 #include "HX711.h"
 #include "EEPROM.h"
 
-#define PIXEL_COUNT 20
 #define PIN_NEOPIXEL 32
 #define BALANCE_PIN_DATA 27
 #define BALANCE_PIN_CLOCK 26
+
 #define BALANCE_GAIN 128
+#define PIXEL_COUNT 24
 
 #define AVERAGING_COUNT 10
 #define EEPROM_CONFIG_ADDRESS 0
 #define UPDATE_PERIOD_MS 1000
 #define MAX_WEIGHT 5000
+
+#define LED_MODE_RELATIVE 0
+#define LED_MODE_ABSOLUTE 1
 
 struct Config
 {
@@ -25,6 +29,7 @@ struct Config
   float weight_per_cup;
   float max_filling;
   byte LED_mode;
+  byte brightness;
 };
 
 //WIFI
@@ -39,6 +44,9 @@ int lb_status_id;
 int num_current_weight_id;
 int num_weight_per_cup;
 int lb_config_message;
+int num_max_filling;
+int sel_LED_mode;
+int num_brightness;
 //GUI
 
 NeoPixelBus<NeoGrbFeature, Neo800KbpsMethod> pixels(PIXEL_COUNT, PIN_NEOPIXEL);
@@ -46,12 +54,22 @@ HX711 balance;
 
 float weight;
 //default config
-Config config = {2, 0, 1, 200};
+Config config = {
+    .version = 2,
+    .balance_offset = 0,
+    .balance_scale = 1,
+    .weight_per_cup = 200,
+    .max_filling = 1500,
+    .LED_mode = LED_MODE_RELATIVE,
+    .brightness = 20};
+
 unsigned long last_update_ms;
 
 void write_config()
 {
+  Serial.println("Writing config.");
   EEPROM.put(EEPROM_CONFIG_ADDRESS, config);
+  EEPROM.commit();
 }
 
 bool read_config()
@@ -59,7 +77,7 @@ bool read_config()
   Config temp;
   EEPROM.get(EEPROM_CONFIG_ADDRESS, temp);
   //wrong version, cannot be handled
-  if (temp.version != 1)
+  if (temp.version != config.version)
     return false;
   config = temp;
   return true;
@@ -67,138 +85,195 @@ bool read_config()
 
 void update_status()
 {
-  char s[128];
-  snprintf(s, sizeof(s), "weight = %f g<br>offset = %f<br>scale = %f", weight, config.balance_offset, config.balance_scale);
-  ESPUI.updateLabel(lb_status_id, s);
-}
-
-void ui_tare_clicked(Control *sender, int type)
-{
-  if (type == B_DOWN)
+  //Neopixel
+  if (weight < 0.1 * config.max_filling)
   {
-    balance.tare(AVERAGING_COUNT);
-    config.balance_offset = balance.get_offset();
-    write_config();
-  }
-}
-
-void ui_calibrate_clicked(Control *sender, int type)
-{
-  if (type == B_DOWN)
-  {
-    float current_weight = ESPUI.getControl(num_current_weight_id)->value.toFloat();
-    //get balance reading with offset allready subtracted!
-    float balance_reading = balance.read_average(AVERAGING_COUNT);
-    if (current_weight > 0 && current_weight < MAX_WEIGHT && balance_reading > 0)
+    float filling = 0;
+    switch (config.LED_mode)
     {
-      config.balance_scale = balance_reading / current_weight;
+    case LED_MODE_RELATIVE:
+      filling = weight * PIXEL_COUNT / config.max_filling;
+      for (int i = 0; i < PIXEL_COUNT; i++)
+      {
+        float color = constrain((filling - i), 0, 1);
+        pixels.SetPixelColor(i, {(byte)((1 - color) * config.brightness), (byte)(color * config.brightness), 0});
+      }
+      break;
+    case LED_MODE_ABSOLUTE:
+      int number_of_cups = config.max_filling / config.weight_per_cup;
+      float filling = weight * number_of_cups / config.max_filling;
+      for (int i = 0; i < PIXEL_COUNT; i++)
+      {
+        if (i > number_of_cups)
+          pixels.SetPixelColor(i, {0, 0, 0});
+        else
+        {
+          float color = constrain((filling - i), 0, 1);
+          pixels.SetPixelColor(i, {(byte)((1 - color) * config.brightness), (byte)(color * config.brightness), 0});
+        }
+      }
+      break;
+    }
+    pixels.Show();
+    //UI
+    char s[128];
+    snprintf(s, sizeof(s), "weight = %f g<br>offset = %f<br>scale = %f", weight, config.balance_offset, config.balance_scale);
+    ESPUI.updateLabel(lb_status_id, s);
+  }
+
+  void ui_update_value(Control * sender, int type)
+  {
+    //dummy callback, the actual work takes place in ESPUI function
+    Serial.println(ESPUI.getControl(num_brightness)->value.toInt());
+  }
+
+  void ui_tare_clicked(Control * sender, int type)
+  {
+    if (type == B_DOWN)
+    {
+      balance.tare(AVERAGING_COUNT);
+      config.balance_offset = balance.get_offset();
       write_config();
     }
   }
-}
 
-void ui_save_config_clicked(Control *sender, int type)
-{
-  if (type == B_DOWN)
+  void ui_calibrate_clicked(Control * sender, int type)
   {
-    Config new_config;
-    new_config.weight_per_cup = ESPUI.getControl(num_weight_per_cup)->value.toFloat();
-    if (new_config.weight_per_cup == 0)
+    if (type == B_DOWN)
     {
-      ESPUI.updateLabel(lb_config_message, "Fehler: weight_per_cup");
-      return;
+      float current_weight = ESPUI.getControl(num_current_weight_id)->value.toFloat();
+      Serial.print("Current weight:");
+      Serial.println(current_weight);
+      //get balance reading with offset allready subtracted!
+      float balance_reading = balance.get_value(AVERAGING_COUNT);
+      Serial.print("Balance reading:");
+      Serial.println(balance_reading);
+      if (current_weight > 0 && current_weight < MAX_WEIGHT && balance_reading > 0)
+      {
+        config.balance_scale = balance_reading / current_weight;
+        write_config();
+      }
     }
-    config = new_config;
-    write_config();
-    ESPUI.updateLabel(lb_config_message, "Gespeichert");
   }
-}
 
-bool CreateWifiSoftAP()
-{
-  WiFi.disconnect();
-  Serial.print(F("Initalize SoftAP "));
-  bool SoftAccOK;
-  SoftAccOK = WiFi.softAP(ssid);
-  delay(2000); // Without delay I've seen the IP address blank
-  WiFi.softAPConfig(wifi_ip, wifi_ip, IPAddress(255, 255, 255, 0));
-  if (SoftAccOK)
+  void ui_save_config_clicked(Control * sender, int type)
   {
-    /* Setup the DNS server redirecting all the domains to the apIP */
-    dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
-    dnsServer.start(DNS_PORT, "*", wifi_ip);
-    Serial.println(F("successful."));
-    Serial.setDebugOutput(true); // Debug Output for WLAN on Serial Interface.
+    if (type == B_DOWN)
+    {
+      //make a copy of the current config and apply changes
+      Config new_config = config;
+      new_config.weight_per_cup = ESPUI.getControl(num_weight_per_cup)->value.toFloat();
+      new_config.max_filling = ESPUI.getControl(num_max_filling)->value.toFloat();
+      new_config.LED_mode = ESPUI.getControl(sel_LED_mode)->value.toInt();
+      new_config.brightness = (byte)ESPUI.getControl(num_brightness)->value.toInt();
+      if (new_config.weight_per_cup == 0)
+      {
+        ESPUI.updateLabel(lb_config_message, "Fehler: weight_per_cup");
+        return;
+      }
+      if (new_config.max_filling <= 0 || new_config.max_filling > MAX_WEIGHT)
+      {
+        ESPUI.updateLabel(lb_config_message, "Fehler: max_filling");
+        return;
+      }
+      if (new_config.LED_mode != LED_MODE_RELATIVE && new_config.LED_mode != LED_MODE_ABSOLUTE)
+      {
+        ESPUI.updateLabel(lb_config_message, "Fehler: LED_mode");
+        return;
+      }
+      config = new_config;
+      write_config();
+      ESPUI.updateLabel(lb_config_message, "Gespeichert");
+      update_status();
+    }
   }
-  else
-  {
-    Serial.println(F("Soft AP Error."));
-    Serial.println(ssid);
-  }
-  return SoftAccOK;
-}
 
-void setFilling(float filling)
-{
-  for (int i = 0; i < PIXEL_COUNT; i++)
+  bool CreateWifiSoftAP()
   {
-    if (i < filling * PIXEL_COUNT)
-      pixels.SetPixelColor(i, {0, 20, 0});
+    WiFi.disconnect();
+    Serial.print(F("Initalize SoftAP "));
+    bool SoftAccOK;
+    SoftAccOK = WiFi.softAP(ssid);
+    delay(2000); // Without delay I've seen the IP address blank
+    WiFi.softAPConfig(wifi_ip, wifi_ip, IPAddress(255, 255, 255, 0));
+    if (SoftAccOK)
+    {
+      /* Setup the DNS server redirecting all the domains to the apIP */
+      dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
+      dnsServer.start(DNS_PORT, "*", wifi_ip);
+      Serial.println(F("successful."));
+      Serial.setDebugOutput(true); // Debug Output for WLAN on Serial Interface.
+    }
     else
-      pixels.SetPixelColor(i, {0, 0, 0});
+    {
+      Serial.println(F("Soft AP Error."));
+      Serial.println(ssid);
+    }
+    return SoftAccOK;
   }
-  pixels.Show();
-  update_status();
-}
 
-void setup()
-{
-  Serial.begin(115200);
-
-  //init EEPROM
-  EEPROM.begin(sizeof(Config));
-  //if config is not readable, write the default one
-  if (!read_config())
-    write_config();
-
-  //initialize balance
-  balance.begin(BALANCE_PIN_DATA, BALANCE_PIN_CLOCK, BALANCE_GAIN);
-  balance.set_offset(config.balance_offset);
-  balance.set_scale(config.balance_scale);
-
-  //Initialize neopixel
-  pinMode(PIN_NEOPIXEL, OUTPUT);
-  pixels.Begin();
-  setFilling(0);
-
-  //start wifi hotspot
-  CreateWifiSoftAP();
-
-  //setup GUI
-  int tab_status = ESPUI.addControl(ControlType::Tab, "Status", "Status");
-  lb_status_id = ESPUI.addControl(ControlType::Label, "Status", "", ControlColor::Wetasphalt, tab_status);
-
-  int tab_balance = ESPUI.addControl(ControlType::Tab, "Waage", "Waage");
-  const char *info_text = "Bitte erst mit leerem Behälter tarieren,<br>dann definiertes Gewicht auf die Platform stellen<br>und auf 'Übernehmen' clicken.";
-  ESPUI.addControl(ControlType::Label, "Info", info_text, ControlColor::Emerald, tab_balance);
-  ESPUI.addControl(ControlType::Button, "Tara", "Tarieren", ControlColor::Emerald, tab_balance, &ui_tare_clicked);
-  num_current_weight_id = ESPUI.addControl(ControlType::Number, "Aktuelles Gewicht", "100", ControlColor::Carrot, tab_balance);
-  ESPUI.addControl(ControlType::Button, "Kalibrieren", "Übernehmen", ControlColor::Carrot, tab_balance, &ui_calibrate_clicked);
-
-  int tab_config = ESPUI.addControl(ControlType::Tab, "Config", "Config");
-  lb_config_message = ESPUI.addControl(ControlType::Label, "Message", "", ControlColor::Wetasphalt, tab_config);
-  num_weight_per_cup = ESPUI.addControl(ControlType::Number, "Gewicht pro Tasse", String(config.weight_per_cup), ControlColor::Alizarin, tab_config);
-  ESPUI.addControl(ControlType::Button, "Speichern", "Speichern", ControlColor::Alizarin, tab_config, &ui_save_config_clicked);
-  ESPUI.begin("CoffeeCounter");
-}
-
-void loop()
-{
-  dnsServer.processNextRequest();
-  if (millis() > last_update_ms + UPDATE_PERIOD_MS)
+  void buildUI()
   {
-    last_update_ms = millis();
-    weight = balance.get_units(AVERAGING_COUNT);
-    update_status();
+    //tab status
+    int tab_status = ESPUI.addControl(ControlType::Tab, "Status", "Status");
+    lb_status_id = ESPUI.addControl(ControlType::Label, "Status", "", ControlColor::Wetasphalt, tab_status);
+
+    //tab balance
+    int tab_balance = ESPUI.addControl(ControlType::Tab, "Waage", "Waage");
+    const char *info_text = "Bitte erst mit leerem Behälter tarieren,<br>dann definiertes Gewicht auf die Platform stellen<br>und auf 'Übernehmen' clicken.";
+    ESPUI.addControl(ControlType::Label, "Info", info_text, ControlColor::Emerald, tab_balance);
+    ESPUI.addControl(ControlType::Button, "Tara", "Tarieren", ControlColor::Emerald, tab_balance, &ui_tare_clicked);
+    num_current_weight_id = ESPUI.addControl(ControlType::Number, "Aktuelles Gewicht", "100", ControlColor::Carrot, tab_balance, &ui_update_value);
+    ESPUI.addControl(ControlType::Button, "Kalibrieren", "Übernehmen", ControlColor::Carrot, tab_balance, &ui_calibrate_clicked);
+
+    //tab config
+    int tab_config = ESPUI.addControl(ControlType::Tab, "Config", "Config");
+    lb_config_message = ESPUI.addControl(ControlType::Label, "Message", "", ControlColor::Wetasphalt, tab_config);
+    num_weight_per_cup = ESPUI.addControl(ControlType::Number, "Gewicht pro Tasse", String(config.weight_per_cup), ControlColor::Alizarin, tab_config, &ui_update_value);
+    num_max_filling = ESPUI.addControl(ControlType::Number, "Maximale Füllung", String(config.max_filling), ControlColor::Alizarin, tab_config, &ui_update_value);
+    num_brightness = ESPUI.addControl(ControlType::Number, "Helligkeit", String(config.brightness), ControlColor::Alizarin, tab_config, &ui_update_value);
+    sel_LED_mode = ESPUI.addControl(ControlType::Select, "Select:", String(config.LED_mode), ControlColor::Alizarin, tab_config, &ui_update_value);
+    ESPUI.addControl(ControlType::Option, "Relativ", String(LED_MODE_RELATIVE), ControlColor::Alizarin, sel_LED_mode);
+    ESPUI.addControl(ControlType::Option, "Absolut", String(LED_MODE_ABSOLUTE), ControlColor::Alizarin, sel_LED_mode);
+    ESPUI.addControl(ControlType::Button, "Speichern", "Speichern", ControlColor::Alizarin, tab_config, &ui_save_config_clicked);
+
+    //begin
+    ESPUI.begin("CoffeeCounter");
   }
-}
+
+  void setup()
+  {
+    Serial.begin(115200);
+    EEPROM.begin(sizeof(Config));
+    //if config is not readable, write the default one
+    Serial.println("Loading config.");
+    if (!read_config())
+    {
+      Serial.println("Could not read config.");
+      write_config();
+    }
+
+    //initialize balance
+    balance.begin(BALANCE_PIN_DATA, BALANCE_PIN_CLOCK, BALANCE_GAIN);
+    balance.set_offset(config.balance_offset);
+    balance.set_scale(config.balance_scale);
+
+    //Initialize neopixel
+    pinMode(PIN_NEOPIXEL, OUTPUT);
+    pixels.Begin();
+
+    //start wifi hotspot
+    CreateWifiSoftAP();
+    buildUI();
+  }
+
+  void loop()
+  {
+    dnsServer.processNextRequest();
+    if (millis() > last_update_ms + UPDATE_PERIOD_MS)
+    {
+      last_update_ms = millis();
+      weight = balance.get_units(AVERAGING_COUNT);
+      update_status();
+    }
+  }
