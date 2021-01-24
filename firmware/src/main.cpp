@@ -41,6 +41,7 @@ const char *ssid = "CoffeeCounter";
 IPAddress wifi_ip(192, 168, 4, 1);
 const byte DNS_PORT = 53;
 DNSServer dnsServer;
+char password[] = "Eltra";
 //END WIFI
 
 //GUI
@@ -220,7 +221,7 @@ bool CreateWifiSoftAP()
   WiFi.disconnect();
   Serial.print(F("Initalize SoftAP "));
   bool SoftAccOK;
-  SoftAccOK = WiFi.softAP(ssid);
+  SoftAccOK = WiFi.softAP(ssid, password);
   delay(2000); // Without delay I've seen the IP address blank
   WiFi.softAPConfig(wifi_ip, wifi_ip, IPAddress(255, 255, 255, 0));
   if (SoftAccOK)
@@ -267,6 +268,12 @@ void buildUI()
 
   //begin
   ESPUI.begin("CoffeeCounter");
+  AsyncCallbackWebHandler handler;
+  handler.setFilter(ON_AP_FILTER);
+  handler.onRequest([](AsyncWebServerRequest *r){
+    r->redirect("http://" + WiFi.softAPIP().toString() + "/");
+  });
+  ESPUI.server->addHandler(&handler);
 }
 
 void setup()
