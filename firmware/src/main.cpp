@@ -41,7 +41,7 @@ const char *ssid = "CoffeeCounter";
 IPAddress wifi_ip(192, 168, 4, 1);
 const byte DNS_PORT = 53;
 DNSServer dnsServer;
-char password[] = "Eltra";
+char password[] = "EltraVerder";
 //END WIFI
 
 //GUI
@@ -268,17 +268,31 @@ void buildUI()
 
   //begin
   ESPUI.begin("CoffeeCounter");
-  AsyncCallbackWebHandler handler;
-  handler.setFilter(ON_AP_FILTER);
-  handler.onRequest([](AsyncWebServerRequest *r){
+
+  //setup captive portal
+  AsyncCallbackWebHandler *handler = new AsyncCallbackWebHandler();
+  handler->onRequest([](AsyncWebServerRequest *r) {
     r->redirect("http://" + WiFi.softAPIP().toString() + "/");
+    Serial.print(r->host());
+    Serial.println(r->url());
   });
-  ESPUI.server->addHandler(&handler);
+  handler->setFilter(ON_AP_FILTER);
+  ESPUI.server->addHandler(handler);
+}
+
+void DoCommunicationTask(void *parameters)
+{
+  for (;;)
+  {
+    dnsServer.processNextRequest();
+    delay(3);
+  }
 }
 
 void setup()
 {
   Serial.begin(115200);
+  delay(1000);
   EEPROM.begin(sizeof(Config));
   //if config is not readable, write the default one
   Serial.println("Loading config.");
@@ -300,11 +314,19 @@ void setup()
   //start wifi hotspot
   CreateWifiSoftAP();
   buildUI();
+  TaskHandle_t communicationTask;
+  //start communication task on core 0, loop runs on core 1
+  xTaskCreatePinnedToCore(DoCommunicationTask, //Task function
+                          "CommunicationTask", //Task name
+                          10000,               //stack depth
+                          NULL,                //parameters
+                          1,                   //priority
+                          &communicationTask,  //out: task handle
+                          0);                  //core
 }
 
 void loop()
 {
-  dnsServer.processNextRequest();
   if (millis() > last_update_ms + UPDATE_PERIOD_MS)
   {
     last_update_ms = millis();
