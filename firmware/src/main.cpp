@@ -10,13 +10,17 @@
 #define BALANCE_PIN_DATA 27
 #define BALANCE_PIN_CLOCK 26
 
+#define AVERAGING_COUNT 10              //per weight reading
+#define BALANCE_UPDATE_PERIOD_MS 500    //read balance twice every second
+#define LED_UPDATE_PERIOD_MS 50         //update LEDs with 20 fps
+#define MAX_WEIGHT 5000                 //you can only calibrate if total weight is smaller
+#define STABLE_WEIGHT_MAX_DIFFERENCE 10 //if two weight readings differe more than this, it us unstable
+#define LED_ANIMATION_PERIOD 1000
+
+//no need to change
+#define EEPROM_CONFIG_ADDRESS 0
 #define BALANCE_GAIN 128
 #define PIXEL_COUNT 24
-
-#define AVERAGING_COUNT 10
-#define EEPROM_CONFIG_ADDRESS 0
-#define UPDATE_PERIOD_MS 1000
-#define MAX_WEIGHT 5000
 
 enum LED_modes
 {
@@ -57,7 +61,9 @@ int num_brightness;
 NeoPixelBus<NeoGrbFeature, Neo800KbpsMethod> pixels(PIXEL_COUNT, PIN_NEOPIXEL);
 HX711 balance;
 
-float weight;
+float weight = 0;
+float last_weight = 0;
+
 //default config
 Config config = {
     .version = 2,
@@ -68,7 +74,9 @@ Config config = {
     .LED_mode = LED_modes::absolute,
     .brightness = 20};
 
-unsigned long last_update_ms;
+unsigned long balance_last_update_ms;
+unsigned long LED_last_update_ms;
+unsigned long LED_period_start_ms;
 
 void write_config()
 {
@@ -88,64 +96,94 @@ bool read_config()
   return true;
 }
 
-void update_status()
+void LED_set_filling()
 {
-  //Neopixel
+  int number_of_cups = config.max_filling / config.weight_per_cup;
+  float filling = 0;
+  switch (config.LED_mode)
+  {
+  case LED_modes::relative:
+    filling = weight * PIXEL_COUNT / config.max_filling;
+    for (int i = 0; i < PIXEL_COUNT; i++)
+    {
+      float color = constrain((filling - i), 0, 1);
+      pixels.SetPixelColor(i, {(byte)((1 - color) * config.brightness), (byte)(color * config.brightness), 0});
+    }
+    break;
+  case LED_modes::absolute:
+    filling = weight / config.weight_per_cup;
+    for (int i = 0; i < PIXEL_COUNT; i++)
+    {
+      if (i > number_of_cups)
+        pixels.SetPixelColor(i, {0, 0, 0});
+      else
+      {
+        //set pixels red or green depending on actual filling
+        float color = constrain(filling - i, 0, 1);
+        pixels.SetPixelColor(i, {(byte)((1 - color) * config.brightness), (byte)(color * config.brightness), 0});
+      }
+    }
+    break;
+  case LED_modes::separated:
+    int pixels_per_cup = 2;
+    float available_cups = weight / config.weight_per_cup;
+    pixels.ClearTo({0, 0, 0});
+    for (int c = 0; c < number_of_cups; c++)
+    {
+      //SetPixelColor just ignores pixles > PIXEL_COUNT
+      int offset = c * (pixels_per_cup + 1);
+      pixels.SetPixelColor(offset, {0, 0, 0});
+      for (int p = 0; p < pixels_per_cup; p++)
+      {
+        float color = constrain((available_cups - c) * pixels_per_cup - p, 0, 1);
+        pixels.SetPixelColor(offset + p, {(byte)((1 - color) * config.brightness), (byte)(color * config.brightness), 0});
+      }
+    }
+    break;
+  }
+}
+
+void LED_set_pressing()
+{
+  // has not been called for some time, so restart the animation
+  if (millis() - LED_period_start_ms > 2 * LED_ANIMATION_PERIOD)
+    LED_period_start_ms = millis();
+  //if it is still running, just make sure we are in a positive realm
+  else if (millis() - LED_period_start_ms > LED_ANIMATION_PERIOD)
+    LED_period_start_ms += LED_ANIMATION_PERIOD;
+  //rotating animation
+  int repetitions = 3;
+  float time = (float)(millis() - LED_period_start_ms) / LED_ANIMATION_PERIOD;
+  for (int i = 0; i < PIXEL_COUNT; i++)
+  {
+    float pos_in_loop = ((float)i) / PIXEL_COUNT;
+    pos_in_loop += time;
+    pos_in_loop *= repetitions;
+    pos_in_loop -= floor(pos_in_loop);
+    float symmetric = 1 - abs(pos_in_loop - 0.5) * 2; //1 to 0 left and right of half period (inveterd v shape curve)
+    symmetric = symmetric * 2 - 1;
+    pixels.SetPixelColor(i, {(byte)(max(config.brightness * symmetric, 0.0f)), (byte)(max(config.brightness * symmetric, 0.0f)), 0});
+  }
+}
+
+void update_LED()
+{
   if (weight < -0.1 * config.max_filling)
   {
+    // no coffee pot
     pixels.ClearTo({0, 0, config.brightness});
+  }
+  else if (abs(weight - last_weight) > STABLE_WEIGHT_MAX_DIFFERENCE)
+  {
+    // someone is pressing the lever
+    LED_set_pressing();
   }
   else
   {
-    float filling = 0;
-    int number_of_cups = config.max_filling / config.weight_per_cup;
-    switch (config.LED_mode)
-    {
-    case LED_modes::relative:
-      filling = weight * PIXEL_COUNT / config.max_filling;
-      for (int i = 0; i < PIXEL_COUNT; i++)
-      {
-        float color = constrain((filling - i), 0, 1);
-        pixels.SetPixelColor(i, {(byte)((1 - color) * config.brightness), (byte)(color * config.brightness), 0});
-      }
-      break;
-    case LED_modes::absolute:
-      filling = weight / config.weight_per_cup;
-      for (int i = 0; i < PIXEL_COUNT; i++)
-      {
-        if (i > number_of_cups)
-          pixels.SetPixelColor(i, {0, 0, 0});
-        else
-        {
-          //set pixels red or green depending on actual filling
-          float color = constrain(filling - i, 0, 1);
-          pixels.SetPixelColor(i, {(byte)((1 - color) * config.brightness), (byte)(color * config.brightness), 0});
-        }
-      }
-      break;
-    case LED_modes::separated:
-      int pixels_per_cup = 2;
-      float available_cups = weight / config.weight_per_cup;
-      pixels.ClearTo({0, 0, 0});
-      for (int c = 0; c < number_of_cups; c++)
-      {
-        //SetPixelColor just ignores pixles > PIXEL_COUNT
-        int offset = c * (pixels_per_cup + 1);
-        pixels.SetPixelColor(offset, {0, 0, 0});
-        for (int p = 0; p < pixels_per_cup; p++)
-        {
-          float color = constrain((available_cups - c) * pixels_per_cup - p, 0, 1);
-          pixels.SetPixelColor(offset + p, {(byte)((1 - color) * config.brightness), (byte)(color * config.brightness), 0});
-        }
-      }
-      break;
-    }
+    // all ok: show filling
+    LED_set_filling();
   }
   pixels.Show();
-  //UI
-  char s[128];
-  snprintf(s, sizeof(s), "weight = %f g<br>offset = %f<br>scale = %f", weight, config.balance_offset, config.balance_scale);
-  ESPUI.updateLabel(lb_status_id, s);
 }
 
 void ui_update_value(Control *sender, int type)
@@ -212,7 +250,7 @@ void ui_save_config_clicked(Control *sender, int type)
     config = new_config;
     write_config();
     ESPUI.updateLabel(lb_config_message, "Gespeichert");
-    update_status();
+    update_LED();
   }
 }
 
@@ -327,10 +365,19 @@ void setup()
 
 void loop()
 {
-  if (millis() > last_update_ms + UPDATE_PERIOD_MS)
+  if (millis() > balance_last_update_ms + BALANCE_UPDATE_PERIOD_MS)
   {
-    last_update_ms = millis();
+    balance_last_update_ms = millis();
+    last_weight = weight;
     weight = balance.get_units(AVERAGING_COUNT);
-    update_status();
+    //UI
+    char s[128];
+    snprintf(s, sizeof(s), "weight = %f g<br>offset = %f<br>scale = %f", weight, config.balance_offset, config.balance_scale);
+    ESPUI.updateLabel(lb_status_id, s);
+  }
+  if (millis() > LED_last_update_ms + LED_UPDATE_PERIOD_MS)
+  {
+    LED_last_update_ms = millis();
+    update_LED();
   }
 }
