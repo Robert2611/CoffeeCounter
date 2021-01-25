@@ -14,8 +14,9 @@
 #define BALANCE_UPDATE_PERIOD_MS 500    //read balance twice every second
 #define LED_UPDATE_PERIOD_MS 50         //update LEDs with 20 fps
 #define MAX_WEIGHT 5000                 //you can only calibrate if total weight is smaller
-#define STABLE_WEIGHT_MAX_DIFFERENCE 10 //if two weight readings differe more than this, it us unstable
+#define STABLE_WEIGHT_MAX_DIFFERENCE 20 //if two weight readings differe more than this, it us unstable
 #define LED_ANIMATION_PERIOD 1000
+#define HISTORY_LENGTH 4
 
 //no need to change
 #define EEPROM_CONFIG_ADDRESS 0
@@ -62,7 +63,7 @@ NeoPixelBus<NeoGrbFeature, Neo800KbpsMethod> pixels(PIXEL_COUNT, PIN_NEOPIXEL);
 HX711 balance;
 
 float weight = 0;
-float last_weight = 0;
+float weight_history[HISTORY_LENGTH];
 
 //default config
 Config config = {
@@ -173,15 +174,26 @@ void update_LED()
     // no coffee pot
     pixels.ClearTo({0, 0, config.brightness});
   }
-  else if (abs(weight - last_weight) > STABLE_WEIGHT_MAX_DIFFERENCE)
-  {
-    // someone is pressing the lever
-    LED_set_pressing();
-  }
   else
   {
-    // all ok: show filling
-    LED_set_filling();
+    float mean = 0;
+    for(int i=0; i<HISTORY_LENGTH; i++)
+      mean += weight_history[i];
+    mean /= HISTORY_LENGTH;
+    float diff = 0;
+    for(int i=0; i<HISTORY_LENGTH; i++)
+      diff += (weight_history[i]-mean)*(weight_history[i]-mean);
+    diff = sqrt(diff / HISTORY_LENGTH);
+    if (diff > STABLE_WEIGHT_MAX_DIFFERENCE)
+    {
+      // someone is pressing the lever
+      LED_set_pressing();
+    }
+    else
+    {
+      // all ok: show filling
+      LED_set_filling();
+    }
   }
   pixels.Show();
 }
@@ -368,6 +380,9 @@ void loop()
   if (millis() > balance_last_update_ms + BALANCE_UPDATE_PERIOD_MS)
   {
     balance_last_update_ms = millis();
+    for(int i=0; i<HISTORY_LENGTH-1; i++)
+      weight_history[i] = weight_history[i+1];
+    weight_history[HISTORY_LENGTH-1] = weight;
     last_weight = weight;
     weight = balance.get_units(AVERAGING_COUNT);
     //UI
